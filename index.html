@@ -1,0 +1,328 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LatEd</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.css">
+    <style>
+        body {
+            font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+        }
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+        }
+        .panel {
+            min-width: 100px;
+        }
+        #editor-container {
+            width: 100%;
+            height: 100%;
+        }
+        .resizer-horizontal {
+            width: 100%;
+            height: 4px;
+            cursor: ns-resize;
+        }
+        .resizer-vertical {
+            width: 4px;
+            height: 100%;
+            cursor: ew-resize;
+        }
+        .monaco-editor .suggest-widget {
+            z-index: 1000 !important;
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen p-4">
+    <main class="flex flex-1 flex-col md:flex-row rounded-lg shadow-xl overflow-hidden border">
+        <div id="left-panel" class="panel flex-shrink-0 overflow-hidden border-r-2 rounded-l-lg">
+            <div id="editor-container"></div>
+        </div>
+
+        <div id="resizer" class="transition-colors hover:bg-indigo-600"></div>
+        <div id="right-panel" class="flex-1 panel overflow-auto p-4 flex flex-col">
+            <div id="output-panel" class="w-full h-full flex flex-col">
+                <div id="rendered-content" class="flex-1 overflow-auto"></div>
+                <div id="error-message" class="font-bold mt-2 pt-2 hidden"></div>
+            </div>
+        </div>
+    </main>
+
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.8/dist/katex.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/monaco-editor@0.41.0/min/vs/loader.js"></script>
+
+    <script>
+        // Wait for the window to load before running our script
+        window.onload = function() {
+            // Get references to the HTML elements
+            const body = document.body;
+            const mainContainer = document.querySelector('main');
+            const leftPanel = document.getElementById('left-panel');
+            const outputPanel = document.getElementById('output-panel');
+            const renderedContent = document.getElementById('rendered-content');
+            const errorMessage = document.getElementById('error-message');
+            const resizer = document.getElementById('resizer');
+            const editorContainer = document.getElementById('editor-container');
+
+            let isResizing = false;
+            let editor;
+
+            const initialLatex = '\\frac{a+b}{c} = \\sum_{n=1}^{\\infty} x_n + \\alpha + \\beta + \\gamma';
+
+            const savedLatex = localStorage.getItem('latexExpression');
+
+            function setTheme(isDark) {
+                if (isDark) {
+                    body.classList.add('bg-gray-900', 'text-gray-200');
+                    body.classList.remove('bg-gray-100', 'text-gray-800');
+                    mainContainer.classList.add('bg-gray-800', 'border-gray-700');
+                    mainContainer.classList.remove('bg-white', 'border-gray-300');
+                    leftPanel.classList.add('border-gray-700');
+                    leftPanel.classList.remove('border-gray-300');
+                    outputPanel.classList.add('bg-gray-800');
+                    outputPanel.classList.remove('bg-gray-50');
+                    errorMessage.classList.add('text-red-400', 'border-gray-700');
+                    errorMessage.classList.remove('text-red-600', 'border-gray-300');
+                    resizer.classList.add('bg-gray-700');
+                    resizer.classList.remove('bg-gray-300');
+                    if (editor) {
+                        monaco.editor.setTheme('vs-dark');
+                    }
+                } else {
+                    body.classList.add('bg-gray-100', 'text-gray-800');
+                    body.classList.remove('bg-gray-900', 'text-gray-200');
+                    mainContainer.classList.add('bg-white', 'border-gray-300');
+                    mainContainer.classList.remove('bg-gray-800', 'border-gray-700');
+                    leftPanel.classList.add('border-gray-300');
+                    leftPanel.classList.remove('border-gray-700');
+                    outputPanel.classList.add('bg-gray-50');
+                    outputPanel.classList.remove('bg-gray-800');
+                    errorMessage.classList.add('text-red-600', 'border-gray-300');
+                    errorMessage.classList.remove('text-red-400', 'border-gray-700');
+                    resizer.classList.add('bg-gray-300');
+                    resizer.classList.remove('bg-gray-700');
+                    if (editor) {
+                        monaco.editor.setTheme('vs-light');
+                    }
+                }
+            }
+
+            const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+            setTheme(isDark);
+
+            window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', event => {
+                setTheme(event.matches);
+            });
+
+            require.config({ paths: { 'vs': 'https://cdn.jsdelivr.net/npm/monaco-editor@0.41.0/min/vs' }});
+            require(['vs/editor/editor.main'], function() {
+                monaco.languages.register({ id: 'latex' });
+                monaco.languages.setMonarchTokensProvider('latex', {
+                    tokenizer: {
+                        root: [
+                            // A simple tokenizer for demonstration
+                            [/(\\\w+)/, 'keyword'],
+                            [/\{/, 'delimiter.bracket'],
+                            [/[()]/, 'delimiter.parenthesis'],
+                            [/\}/, 'delimiter.bracket'],
+                            [/\d+(\.\d*)?/, 'number'],
+                            [/[+\-*=\/^_~]/, 'operator'],
+                            [/%.*$/, 'comment'],
+                            [/[a-zA-Z]/, 'variable'],
+                        ]
+                    }
+                });
+
+                // Define a custom completion provider for LaTeX commands
+                monaco.languages.registerCompletionItemProvider('latex', {
+                    triggerCharacters: ['\\'],
+                    
+                    provideCompletionItems: (model, position) => {
+                        const lineText = model.getLineContent(position.lineNumber);
+                        const textUntilPosition = lineText.substring(0, position.column - 1);
+                        
+                        const matches = textUntilPosition.match(/\\(\w*)$/);
+                        
+                        let range;
+                        if (matches) {
+                            const wordStartColumn = position.column - matches[0].length;
+                            range = new monaco.Range(position.lineNumber, wordStartColumn, position.lineNumber, position.column);
+                        } else {
+                            range = new monaco.Range(position.lineNumber, position.column - 1, position.lineNumber, position.column);
+                        }
+
+                        const latexSnippets = [
+                            { label: "\\alpha", insertText: "\\alpha", documentation: "Alpha", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\beta", insertText: "\\beta", documentation: "Beta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\gamma", insertText: "\\gamma", documentation: "Gamma", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\delta", insertText: "\\delta", documentation: "Delta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\epsilon", insertText: "\\epsilon", documentation: "Epsilon", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\varepsilon", insertText: "\\varepsilon", documentation: "Epsilon (variant)", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\zeta", insertText: "\\zeta", documentation: "Zeta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\eta", insertText: "\\eta", documentation: "Eta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\theta", insertText: "\\theta", documentation: "Theta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\vartheta", insertText: "\\vartheta", documentation: "Theta (variant)", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\iota", insertText: "\\iota", documentation: "Iota", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\kappa", insertText: "\\kappa", documentation: "Kappa", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\lambda", insertText: "\\lambda", documentation: "Lambda", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\mu", insertText: "\\mu", documentation: "Mu", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\nu", insertText: "\\nu", documentation: "Nu", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\xi", insertText: "\\xi", documentation: "Xi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\pi", insertText: "\\pi", documentation: "Pi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\varpi", insertText: "\\varpi", documentation: "Pi (variant)", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\rho", insertText: "\\rho", documentation: "Rho", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\varrho", insertText: "\\varrho", documentation: "Rho (variant)", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\sigma", insertText: "\\sigma", documentation: "Sigma", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\varsigma", insertText: "\\varsigma", documentation: "Sigma (variant)", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\tau", insertText: "\\tau", documentation: "Tau", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\upsilon", insertText: "\\upsilon", documentation: "Upsilon", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\phi", insertText: "\\phi", documentation: "Phi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\varphi", insertText: "\\varphi", documentation: "Phi (variant)", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\chi", insertText: "\\chi", documentation: "Chi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\psi", insertText: "\\psi", documentation: "Psi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\omega", insertText: "\\omega", documentation: "Omega", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Gamma", insertText: "\\Gamma", documentation: "Capital Gamma", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Delta", insertText: "\\Delta", documentation: "Capital Delta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Theta", insertText: "\\Theta", documentation: "Capital Theta", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Lambda", insertText: "\\Lambda", documentation: "Capital Lambda", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Xi", insertText: "\\Xi", documentation: "Capital Xi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Pi", insertText: "\\Pi", documentation: "Capital Pi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Sigma", insertText: "\\Sigma", documentation: "Capital Sigma", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Upsilon", insertText: "\\Upsilon", documentation: "Capital Upsilon", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Phi", insertText: "\\Phi", documentation: "Capital Phi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Psi", insertText: "\\Psi", documentation: "Capital Psi", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\Omega", insertText: "\\Omega", documentation: "Capital Omega", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\frac", insertText: "\\frac{${1:numerator}}{${2:denominator}}", documentation: "Insert a fraction.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\sqrt", insertText: "\\sqrt{${1:expression}}", documentation: "Insert a square root.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\sum", insertText: "\\sum_{${1:i=0}}^{${2:n}}", documentation: "Insert a summation.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\int", insertText: "\\int_{${1:a}}^{${2:b}}", documentation: "Insert an integral.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\lim", insertText: "\\lim_{${1:x \\to \\infty}}", documentation: "Insert a limit.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\sin", insertText: "\\sin(${1:x})", documentation: "Insert sine function.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\cos", insertText: "\\cos(${1:x})", documentation: "Insert cosine function.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\tan", insertText: "\\tan(${1:x})", documentation: "Insert tangent function.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\log", insertText: "\\log_{${1:base}}(${2:x})", documentation: "Insert logarithm.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\ln", insertText: "\\ln(${1:x})", documentation: "Insert natural logarithm.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\begin{array}", insertText: "\\begin{array}{${1:columns}}\n\t$2\n\\end{array}", documentation: "Insert an array environment.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\begin{equation}", insertText: "\\begin{equation}\n\t$1\n\\end{equation}", documentation: "Insert an equation environment.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\begin{aligned}", insertText: "\\begin{aligned}\n\t$1\n\\end{aligned}", documentation: "Insert an aligned environment.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\begin{cases}", insertText: "\\begin{cases}\n\t$1\n\\end{cases}", documentation: "Insert a cases environment.", kind: monaco.languages.CompletionItemKind.Snippet },
+                            { label: "\\sum", insertText: "\\sum", documentation: "Summation symbol", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\int", insertText: "\\int", documentation: "Integral symbol", kind: monaco.languages.CompletionItemKind.Text },
+                            { label: "\\infty", insertText: "\\infty", documentation: "Infinity symbol", kind: monaco.languages.CompletionItemKind.Text }
+                        ];
+
+                        const suggestions = latexSnippets.map(hint => ({
+                            ...hint,
+                            range: range,
+                            insertTextRules: hint.kind === monaco.languages.CompletionItemKind.Snippet ? monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet : undefined,
+                        }));
+
+                        return { suggestions: suggestions };
+                    }
+                });
+
+                const initialTheme = isDark ? 'vs-dark' : 'vs-light';
+                editor = monaco.editor.create(editorContainer, {
+                    value: savedLatex || initialLatex,
+                    language: 'latex',
+                    theme: initialTheme,
+                    wordWrap: 'on',
+                    automaticLayout: true
+                });
+
+                editor.onDidChangeModelContent(renderLatex);
+
+                renderLatex();
+            });
+
+            function renderLatex() {
+                const latexCode = editor.getValue();
+                try {
+                    const renderedHtml = katex.renderToString(latexCode, {
+                        throwOnError: true,
+                        displayMode: true
+                    });
+
+                    renderedContent.innerHTML = renderedHtml;
+                    errorMessage.classList.add('hidden');
+                    
+                    localStorage.setItem('latexExpression', latexCode);
+                } catch (error) {
+                    errorMessage.innerHTML = `<p class="font-bold">Error:</p><pre class="mt-2 whitespace-pre-wrap">${error.message}</pre>`;
+                    errorMessage.classList.remove('hidden');
+                }
+            }
+
+            function setInitialLayout() {
+                const isMobile = window.innerWidth < 768;
+                const isDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+
+                // Remove previous border classes
+                leftPanel.classList.remove('border-r-2', 'border-b-2', 'border-gray-700', 'border-gray-300');
+                leftPanel.classList.remove('rounded-t-lg', 'rounded-l-lg');
+
+                if (isMobile) {
+                    leftPanel.style.width = '100%';
+                    leftPanel.style.height = `${mainContainer.offsetHeight / 2}px`;
+                    resizer.classList.remove('resizer-vertical');
+                    resizer.classList.add('resizer-horizontal');
+                    leftPanel.classList.add('border-b-2');
+                    leftPanel.classList.add('rounded-t-lg');
+                } else {
+                    leftPanel.style.width = `${mainContainer.offsetWidth / 2}px`;
+                    leftPanel.style.height = '100%';
+                    resizer.classList.remove('resizer-horizontal');
+                    resizer.classList.add('resizer-vertical');
+                    leftPanel.classList.add('border-r-2');
+                    leftPanel.classList.add('rounded-l-lg');
+                }
+            }
+
+            resizer.addEventListener('mousedown', (e) => {
+                isResizing = true;
+                e.preventDefault();
+                const isMobile = window.innerWidth < 768;
+                document.body.style.cursor = isMobile ? 'ns-resize' : 'ew-resize';
+                leftPanel.style.userSelect = 'none';
+                leftPanel.style.pointerEvents = 'none';
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                if (!isResizing) return;
+                const isMobile = window.innerWidth < 768;
+                
+                if (isMobile) {
+                    const containerHeight = mainContainer.offsetHeight;
+                    const newHeight = e.clientY - mainContainer.getBoundingClientRect().top;
+                    
+                    if (newHeight > 100 && (containerHeight - newHeight) > 100) {
+                        leftPanel.style.height = `${newHeight}px`;
+                    }
+                } else {
+                    const containerWidth = mainContainer.offsetWidth;
+                    const newWidth = e.clientX - mainContainer.getBoundingClientRect().left;
+                    
+                    if (newWidth > 100 && (containerWidth - newWidth) > 100) {
+                        leftPanel.style.width = `${newWidth}px`;
+                    }
+                }
+            });
+
+            window.addEventListener('mouseup', () => {
+                isResizing = false;
+                document.body.style.cursor = '';
+                leftPanel.style.userSelect = '';
+                leftPanel.style.pointerEvents = '';
+            });
+
+            window.addEventListener('resize', setInitialLayout);
+            setInitialLayout();
+        };
+    </script>
+</body>
+</html>
